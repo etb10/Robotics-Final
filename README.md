@@ -1,4 +1,4 @@
-# ECE 383 Final Notes
+# Final Notes
 
 ## Lab 5
 ### Overview
