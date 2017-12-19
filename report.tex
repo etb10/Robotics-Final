@@ -1,0 +1,320 @@
+%% IMPORTANT: Once working, run latex 3 times to get listoffigures to work
+%% Be sure to check spelling!
+
+%% For the figures, the epsfig lines are currently commented out;
+%% when you want to add a figure, just take the % out and make
+%% sure the file name is correct
+
+\documentclass{article}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{amsmath} % load AMS-Math package
+\usepackage{epsfig} % allows PostScript files
+\usepackage{listings} % allows lstlisting environment
+\usepackage{moreverb} % allows listinginput environment
+\usepackage{vmargin} % allows better margins
+\usepackage{biblatex} % bibliography
+\setpapersize{USletter} % sets the paper size
+\title{Robotics Final}
+\setmarginsrb{1in}{0.5in}{1in}{0.2in}{12pt}{11mm}{0pt}{11mm} %sets
+                                %margins 
+\begin{document}
+\begin{center}
+\rule{6.5in}{0.5mm}\\~\\
+{\bf \large ECE 383 -- Spring 2017}\\~\\
+{\huge \bf Final Project - Event A}\\~\\ 
+Edwin Bodge (etb10)\\~\\
+December 15, 2017\\~\\
+{\small I have adhered to the Duke Community Standard in completing this assignment.  I understand that a violation of the Standard can result in failure of this assignment, failure of this course, and/or suspension from Duke University.} 
+\rule{6.5in}{0.5mm}\\
+\end{center}
+\tableofcontents
+\listoffigures
+\pagebreak
+
+\section{Introduction}
+In this report, an approach to robotic system design will be detailed and defended. This robotic system utilizes a 6DOF Robot in the Klamp't Online simulator to accurately sense, detect, and hit thrown balls. These objects are uniquely colored, and are thrown towards a "goal". The robot stands in front of the goal and is tasked with colliding with the balls in order to prevent them from scoring points. Balls that pass through the goal result in points deducted from the final score. The first half of this project involves determining the control of the robot based on sensed objects. For purposes of developing this controller, the simulation was provided with an omniscient sensor, which provides accurate position and velocity readings of each ball. \par
+
+In order to sense the balls in a realistic fashion, the simulation utilizes a camera, otherwise known as a blob detector. This blob detector constructs a 2D representation of a sensed object, providing the x and y pixel location of the center of the object, the pixel width and height of the object, and the color of the object. This sensed information is processed and sent to the perception stage, which allows the robot to make informed decisions about where to block. The details of this system and the process by which it was constructed is the topic of this paper.
+
+\section{Summary}
+
+Figure \ref{fig:summary} illustrates the high level design of this robotic system. The system relies on 4 separate stages: Sensing, Perception, Planning, and Control. \par 
+
+\begin{figure}[htb!]
+\begin{center}
+\includegraphics[width=0.8\textwidth]{robotics_summary.pdf}
+\caption{\label{fig:summary} High Level Outline of Robot System Design}
+\end{center}
+\end{figure}
+
+As described previously, the blob detector provides 2D information about the location of the ball in its frame of reference, in addition to the ball's perceived width and height. This information is provided in measurement values of pixels, and fed into the perception stage as a \emph{CameraColorDetectorOutput} object. \par
+
+% Perception Summary
+The perception model transforms the perceived 2D pixel information into 3D world coordinate data; this task comprises the predict stage of perception. At a high level, the 3D world coordinate is determined by mapping the x and y camera pixel locations to actual x and y locations in the camera's reference frame. The 3rd dimension, or camera z-Position, is determined by the scaling factor between the ball's actual radius and the sensed radius of the blob. This scaling factor determines the depth from the sensor where the object is located. This position is then converted from camera coordinates to world coordinates. \par 
+
+The world coordinates are then passed to a smoothing function. This module relies on stored data of previous measurements to perform two tasks that comprise the predict stage of perception. First, the module utilizes a combination of the new sensor data and the previous measurements in order to determine a smoothed position estimate. This estimate will be highlighted later, however involves constructing a weighted mean of the previous position values. Second, the module utilizes this history of position data to predict the velocity of the object. The velocity is then stored in the model to be used as historical smoothing data in future steps. The final predicted state, containing both the predicted position and velocity, is sent as a \emph{MultiObjectStateEstimate} object into the planning stage.
+
+% Planning Summary
+The planning stage performs three key tasks. First, it determines whether or not the \emph{MultiObjectStateEstimate} object is moving anywhere towards the robot; this is illustrated in Figure \ref{fig:summary} as \emph{Threshold Logic/Gate}. Criteria for invalid configurations includes a ball sitting still, a ball with velocity in the positive x-direction (away from the robot), or a ball that has rolled off the table. Second, if the \emph{MultiObjectStateEstimate} represents a ball that may be worth blocking, the planning stage uses a basic prediction model to estimate the projected trajectory of the ball. This prediction takes into account collisions with the ground, and properly handles "bouncing" to predict an accurate trajectory. Third, the predicted locations of the ball are fed into a module that checks whether or not the trajectory will result in a scored goal. If the trajectory is critical, and within reach of the robot, the predicted location of the ball is sent to the controller. Otherwise, the planning model continues to construct the trajectory further in time, up to a certain threshold. \par 
+
+% Control Summary
+The predicted location of the ball is fed into the Control Stage, as shown in Figure \ref{fig:summary} as \emph{block\_location [x,y,z]}. This location is fed into an Inverse Kinematics Solver, which produces a configuration \emph{q} and boolean \emph{solved}. The result \emph{solved} is fed into a state machine, which determines how the robot should behave; namely, whether the robot should update its target location, or if it should remain targeting the same location. The configuration \emph{q} is sent into the controller, and dependent upon the state of the robot, will be used to set a configuration of the robot. 
+
+
+
+
+%% Components Section
+\section{Components in Detail}
+
+%% Perception Components
+\subsection{Perception Components} \label{sec:comp_perception}
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.6\textwidth]{perception.pdf}
+\caption{\label{fig:percepton} Detailed Components of Perception Stage}
+\end{center}
+\end{figure}
+The detailed perception components can be found in Figure \ref{fig:percepton}. The perception stage takes in a single input from the sensing stage, a \emph{CameraColorDetectorOutput} object. This object is in the reference frame of the camera, and contains a list of multiple \emph{CameraBlob} objects. Each \emph{CameraBlob} object contains three key pieces of data.
+\begin{itemize}
+\item X and Y locations of the "blob" in the camera's field of view. These values are given in measurements of pixels, where the resolution of the camera is 320 pixels wide, 240 pixels tall.
+\item Width and Height of the detected "blob".
+\item Three-digit tuple containing the color of the detected blob. 
+\end{itemize}
+The module \emph{MyObjectStateEstimator} is the main component within the perception stage as it behaves as an interface between the sensing and planning stages. The subcomponents used to perform perception are controlled by this module, and are implemented as follows.
+
+% Pixel_to_Camera
+\subsubsection*{Pixel to Camera Coordinate Conversion}
+The \emph{Pixel to Camera} module is responsible for transforming blob data from the camera into position coordinates in the camera's reference frame. The data from each \emph{CameraBlob} object is sent into this module. This data input includes the pixel measurements detailed above in Section \ref{sec:comp_perception}. For this implementation, the \emph{MyObjectStateEstimator} only sends the highest indexed \emph{CameraBlob} object; this is to prevent confusion by trying to target multiple blobs at once. This sometimes sacrifices going after multiple targets, but handles the error where too many objects would confuse the robot. This component is utilized every time that a new \emph{CameraColorDetectorOutput} object is sent to the \emph{MyObjectStateEstimator} module. \par
+
+% Radius Smoothing
+The width and height of the blob are averaged in order to estimate the perceived diameter of the ball in pixels; this value is then divided by two in order to determine the radius in pixels. Because the width and height of the object in the blob detector is given with single pixel precision with magnitudes from approximately 5 to 30 pixels, the accuracy and precision of these values are quite low. Therefore, the calculated radius value is run through a historical smoothing module in order to determine a more accurate prediction for radius. The smoothing module utilizes historical radius readings as follows.
+\begin{align}
+average = \frac{\sum_{i=0}^{n} i * radius_history(i)}{\sum_{i=0}^{n} i} \label{eq:radiussmooth}
+\end{align}
+Older radius history values are given less weight in this calculation, where the newest readings are given the most weight. The history only looks back 4 steps in time from the current reading and recycles data as required; this allows for faster and more up-to-date computations. \par 
+
+% pixel to actual 
+Once the smoothed pixel-radius of the ball is calculated, it is fed to to the \emph{Radius to Coordinates} subcomponent. This component uses the pixel-radius of the ball and the actual radius of the ball to calculate the 3D camera coordinates. By switching to "omniscient mode" and printing out the world z-position of the balls as they sit on the playing field, the radius of each ball was determined to be 0.103 units. The law of similar triangles was then used to calculate the x and y locations, as shown below.
+\begin{align}
+x_{blob}^{actual} = \frac{radius_{actual}}{radius_{pixels}} * (x_{blob}^{pixel} - x_{center}^{pixel}) = \frac{0.103}{radius_{pixels}} * (x_{blob}^{pixel} - 160) \\
+y_{blob}^{actual} = \frac{radius_{actual}}{radius_{pixels}} * (y_{blob}^{pixel} - y_{center}^{pixel}) = \frac{0.103}{radius_{pixels}} * (y_{blob}^{pixel} - 120)
+\end{align}
+The ratio between actual radius and the perceived pixel radius was used to determine the actual x and y positions of the ball within the camera's coordinate frame. \par
+
+The z position of the ball within the camera's coordinate frame was then determined by mapping radius size to z depth in the camera's field of vision. This is done through an algorithm developed and described in Section \ref{sec:perception}; it follows a similar law of proportions, allowing the ratio between actual radius and pixel radius to determine the depth of the image. \par
+
+The final output of this subcomponent is a vector containing the objects perceived location in camera coordinates. This value is then fed into the Camera to World module.
+
+% Camera to World
+\subsubsection*{Camera to World Coordinate Conversion}
+This module converts an input of camera coordinates into world coordinates through the provided \emph{Tsensor} transformation matrix. This utilizes the Python command \emph{se3.apply(Transformation, [x,y,z])}.
+
+% World Smoothing
+\subsubsection*{Coordinate Smoothing}
+Coordinate smoothing occurs by utilizing a history of position and velocity data to predict the current position of the object. The position is updated first, and relies on an averaging schema similar to equation \ref{eq:radiussmooth}. However, this average includes the model prediction similar to that of a Kalman filter (though without modeling uncertainty). It utilizes the following operation for each position and velocity pair in memory, where n is the number of time steps that have occurred between the perception of that data point and the current time.
+
+\begin{align} \label{eq:matrix_predict}
+\begin{bmatrix}
+    \vec{x}_{i} \\
+    \vec{v}_{i}
+\end{bmatrix}
+=
+\begin{bmatrix}
+    I_{3} & n\Delta t I_{3} \\
+    0_{3} & I_{3} 
+\end{bmatrix}
+\begin{bmatrix}
+    \vec{x}_{i-n} \\
+    \vec{v}_{i-n}
+\end{bmatrix}
++
+\begin{bmatrix}
+    \vec{0}_{3} \\
+    0 \\
+    0 \\
+    -ng\Delta t
+\end{bmatrix}
+\end{align}
+
+The result of this calculation is used for the arithmetic mean of position and velocity, similar to equation \ref{eq:radiussmooth}. These values are then properly written back to the position and velocity history. 
+
+The final output of this module is a 6-index vector, containing the perceived position and velocity of the ball in world coordinates. This is output back to the \emph{MyObjectStateEstimator} module, which then packages the processed velocity, position, and original color reading into a \emph{MultiObjectStateEstimate} object of length one. This object is then passed to the planning stage.
+
+
+
+% Planning Components
+\subsection{Planning Components} \label{sec:planningcomp}
+The planning stage is responsible for determining whether or not the robot should take action to block an incoming ball. It takes an input of a \emph{MultiObjectStateEstimate} object, which primarily contains the color, position, and velocity of an incoming ball in world coordinates. The details of the planning stage are shown in Figure \ref{fig:planning}
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.6\textwidth]{planning.pdf}
+\caption{\label{fig:planning} Detailed Components of Planning Stage}
+\end{center}
+\end{figure}
+
+% Threshold Logic 
+\subsubsection*{Threshold Logic}
+The \emph{MultiObjectStateEstimate} object is first processed by a simple logical check. This subcomponent checks for three criteria to deem a \emph{MultiObjectStateEstimate} object negligible.
+\begin{itemize}
+\item If the ball's perceived z-position is less than -0.5, it has fallen off the table.
+\item If the ball's perceived x-position is greater than 3, it has likely not been launched.
+\item If the ball's perceived x-velocity is positive, it is rolling in the opposite direction of the goal and should be ignored.
+\end{itemize}
+If the \emph{MultiObjectStateEstimate} object does not meet these criteria for exemption, it is then passed on to the next module unchanged. If any of the above criteria are true, there is no need to block an object, therefore an empty location is sent into the next module as [ ].
+
+% Predict Next Location
+\subsubsection*{Predict Next Location} \label{sec:predictnextlocation}
+This module only runs if the unmodified \emph{MultiObjectStateEstimate} object is passed to it. This module is responsible for predicting the trajectory of the ball based on the input world velocity and position. This module uses the physics displayed in equation \ref{eq:matrix_predict} in order to predict the next location of the ball. This is done iteratively, where the next state is predicted, then immediately passed to the next module. This state is composed of the object's state and velocity. If the next module does not succeed, which will be explained in the next section, this module is passed back its predicted value. It will then process this predicted value in the same manner as it handled the \emph{MultiObjectStateEstimate} object, using equation \ref{eq:matrix_predict}. This module and the next module repeat this process for up to 20 cycles, or until the next module is successful. Upon reaching 20 cycles, it is assumed that the ball should be ignored, which will be detailed in the following section. The module then passes an empty list to the output of the planning stage, signifying that the controller should not change configuration.
+
+% Within Reach
+\subsubsection*{Within Reach}
+This module accepts the input position and velocity vectors from the \emph{Predict Next Location} module, which are position and velocity estimates along the trajectory of the ball. This module checks whether or not the predicted location falls within the realm of reachable space for the robot that would allow the ball to score. The criteria for a critical ball position are as follows.
+\begin{itemize}
+\item If x-position is between -2.5 and -1.7 units. This is approximately from the goal to a few units in front of the robot.
+\item If y-position is between -1.2 and 1.2 units. This covers the width of the goal.
+\item If z-position is between 0.09 and 1.2 units. This covers the ground up to the top of the goal, though prevents the robot from trying to run its arm into the ground.
+\end{itemize}
+If the projected position of the ball is within this range, then the module passes the current position to the output of the planning module. This signifies that the ball is currently on a trajectory to score at this specific position. If the projected position of the ball is not within this range, then the module passes the current position and velocity back to the \emph{Predict Next Location} module in order to continue processing. If this module executes 20 times for a specific perception value without sensing a ball projected to score, this module passes an empty array to the output of the planning module. \par ~ \par
+
+In summary, the planning stage outputs a position vector in world coordinates. If this vector has 3 values, then it is a valid location where the ball will be. If the vector is empty, then the perceived ball is predicted not to score.
+
+
+% Control Components
+\subsection{Control Components}
+The control stage is responsible for handling projected ball locations, and consequently programming the robot to accurately move in response to these projected locations. The details of this stage can be found in Figure \ref{fig:control}. 
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.6\textwidth]{control.pdf}
+\caption{\label{fig:control} Detailed Components of Control Stage}
+\end{center}
+\end{figure}
+
+The input to the controller is a vector specifying the projected position of a scoring ball. This vector, as described in the previous section, will either contain three entries to specify the location of a scoring ball, or zero entries to specify that there are no balls predicted to score. If the vector is empty, a boolean signal is sent to the state machine that there are no balls to protect against. The state machine handles this response as necessary, which will be detailed later. Otherwise, if the input vector contains three values, then this value is sent to the \emph{IK Solver} for processing.
+
+
+% IK Solver
+\subsubsection*{IK Solver}
+This module is only called when the control stage successfully receives a position vector specifying the location of an incoming ball. The IK Solver utilizes this position and information about the 6DOF robotModel in order to perform inverse kinematics. The solver seeds the robot with its current configuration, retrieved using the command \emph{robotController.getSensedConfig()}, and performs 100 iterations trying to solve the IK problem where the desired end-effector location lines up with the position vector of the incoming ball. The solver runs up to 100 times on the end-effector, or until it successfully determines a configuration. If this process was unsuccessful, IK is then performed where the ends of other links are compared against the position of the incoming ball. This opens the possibility for other links to act as the goalie, just in case the incoming position is unreachable by the end effector. \par 
+
+The IK solver outputs two signals. First, it outputs the recommended configuration for the robot. In the case of a successfully solved IK problem, this output is a vector containing a configuration rotation for each joint. In the case of an unsuccessful IK problem, this output is an empty vector. These vectors are sent to the RobotController module. \par 
+
+Second, the IK solver outputs a boolean value to the state machine. This boolean represents the success of the IK solver; hence, 1 for success, 0 for failure.
+
+% State Machine
+\subsubsection*{State Machine} 
+This state machine determines what state of control the robot should be under. It takes an input as a boolean variable, which represents whether or not inverse kinematics were successfully solved to intercept a ball's trajectory. This input either comes from the input of the control module, when an empty vector is input, or when the IK Solver is unsuccessful in determining a configuration to intercept the robot. \par 
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.4\textwidth]{state_machine.pdf}
+\caption{\label{fig:fsm} State Machine of Robot Controller}
+\end{center}
+\end{figure}
+
+The state machine has 5 different states, as shown in Figure \ref{fig:fsm}. The robot is initialized at the "WAIT" state. With input "Not Solved", the state machine moves towards the "WAIT" state. Upon receipt of a "Solved" signal while at any state, the state machine moves to "BLOCK". It remains at this stage until a "Not Solved" signal is received, when it then moves through the stages "W1", "W2", and "W3". Stages "BLOCK" through "W3" produce an output string of "Block", while the "WAIT" stage produces an output string of "Wait". These signals are sent to the RobotController, which determine the course of action for the robot. The motivation behind this state machine is to require 4 unsuccessful ball location targeting cycles to occur before definitively determining whether or not the robot should be waiting. This will be further explained in the \emph{Planning and Control Strategy} section. \par 
+
+% Robot Controller
+\subsubsection*{Robot Controller}
+The Robot Controller module is responsible for programming the robot. It takes two inputs: the state of the robot system, as specified by the previous state machine, and the configuration \emph{q} from the IK Solver. \par 
+
+If the state input is "Block", then the robot will perform one of two actions. If the configuration \emph{q} is a valid list of joint encodings, then the robotController will be programmed with the command \emph{robotController.setMilestone(q)}. If the configuration \emph{q} is an empty list, then the robot will not be programmed during this cycle. This means the robot will stay at configurations programmed in previous cycles; this is generally to avoid programming conflicts due to perturbations in trajectory prediction data. \par 
+
+If the state input is "Wait", the robot will go to a "waiting" configuration. This strategy will be explained in Section \ref{sec:planningcontrol}, however broadly returns the robot to a strategic location to help it become ready to block the next incoming block. \par ~ \par 
+
+% quick wrap-up
+This concludes the description of components utilized in this robot system. The components have been detailed extensively, however the next two sections will illustrate the underlying logic and strategy behind completing the assignment. Much of this information has been touched on during this section, therefore the subsequent sections are written to reduce redundancy.
+
+
+
+%% Planning and Control Strategy
+\section{Planning and Control Strategy} \label{sec:planningcontrol}
+The previous sections have highlighted the components utilized to perceive objects, and consequently process their signals in order to plan-for and defend-against incoming objects. The state machine diagram shown in Figure \ref{fig:control_fsm} illustrates the high-level methodology used to make planning and control decisions. This section will highlight these decisions, and the precise computations behind them.
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.4\textwidth]{control_fsm.pdf}
+\caption{\label{fig:control_fsm} High Level Control State Machine}
+\end{center}
+\end{figure}
+
+% Failure Handling
+\subsection{A Note on Failure Handling}
+In this model, a "failure" could be triggered by three different phenomenon. Rather than think of these events as "failures", it would be more accurate to consider them as signals not to block a ball. The following discussion will highlight what these events are, and how they are handled. \par 
+
+First, the state (position and velocity) passed to the planning stage in the \emph{MultiObjectStateEstimate} object may violate one of the three criteria highlighted in Figure  \ref{fig:control_fsm}. A ball's state may be rolling backwards, off the table, or sitting still. Any of these states signal that the ball is not a scoring threat, and should therefore not be acted upon. Second, the predicted trajectory of the ball may not be set to score, as determined by the \emph{Within Reach} module described in Section \ref{sec:planningcomp}. In this case, we assume that the ball is not a scoring threat, and we should therefore not act upon this ball. Third, we may fail to properly solve the inverse kinematics problem. This event would actually be considered a "failure", as the ball is predicted to score, however the robot cannot move to block it. In this case, we simply cannot move the robot to a location, therefore allow the state machine to determine the subsequent configuration of the robot.
+
+
+% Trajectory Mapping
+\subsection{Trajectory Mapping}
+The \emph{Predict Next Location} module detailed in Section \ref{sec:predictnextlocation} generates the predicted trajectory for the ball. This module takes into account "bouncing" when the z-position of the predicted state falls to 0 or lower. This allows for accurate prediction of the ball's location even when it is moving far from the robot. Examples of this predicted trajectory can be seen in Figures \ref{fig:omniscient_traj} and \ref{fig:my_traj}. 
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{.5\textwidth}
+  \centering
+  \includegraphics[width=.7\linewidth]{omniscient_traj.png}
+  \caption{\label{fig:omniscient_traj} Omniscient Mode}
+\end{subfigure}%
+\begin{subfigure}{.5\textwidth}
+  \centering
+  \includegraphics[width=.7\linewidth]{my_traj.png}
+  \caption{Blob Detector Mode}
+  \label{fig:my_traj}
+\end{subfigure}
+\caption{Trajectory Tracking Examples}
+\label{fig:test}
+\end{figure}
+
+Each position in the ball's predicted trajectory is then checked to see if it will score, and if it is reachable by the robot. As the trajectory is calculated, it grows towards the goal and is checked in real time in order to reduce the amount of computation that is required. The first position that could be blocked by the robot is immediately chosen. As shown in Figure \ref{fig:test}, the predicted trajectory accounts for bouncing, which will allow the robot to defend against "ground balls".
+
+% IK Solving
+\subsection{IK Solving}
+The process of Inverse Kinematics solving has primarily been described in the previous discussion of components. The main strategic addition to this module is the allowance of multiple joints to serve as the "goalie" for this problem. As described previously, the IK Solver first tries to solve the IK problem to defend with the end-effector. However, upon failure, the IK Solver then iterates through every other link to look for an unconventional solution.
+
+% State Machine
+\subsection{State Machine}
+The motivation behind the state machine detailed in Section \ref{fig:fsm} is to help filter out bad readings for the robot model. With noisy readings from the previous stages, sometimes a ball is predicted to be harmless while it's truly heading towards the goal. In this case, the state machine will receive the signal "Not Solved", and consequently move towards the "WAIT" stage. Without the 3 buffer stages between "BLOCK" and "WAIT", this noisy reading would cause the robot to move back to its waiting stage, while it should have been moving towards an obstacle. The state machine provides a buffer between the "BLOCK" and "WAIT" stages to handle the noisy readings from the sensors.
+
+% Waiting and Blocking
+\subsection{Waiting and Blocking}
+There are two main strategies for robot control, which are defined by "BLOCK" and "WAIT". The blocking state has been extensively described in previous sections. The waiting state will return the robot to one of three configurations.
+\begin{itemize}
+\item If the robot is currently oriented a certain amount above of the x-axis, then program to a configuration where the robot will be low and facing forward, slightly above the x-axis.
+\item If the robot is currently oriented a certain amount below of the x-axis, then program to a configuration where the robot will be low and facing forward, slightly below the x-axis.
+\item Otherwise, return to a forward-facing, neutral-height position.
+\end{itemize}
+The purpose of this control is to allow the robot to return to a strategic location where it will easily be able to reach the next incoming ball. When the robot was programmed to return only to the third reset position, and a ball was launched towards its previous location, it would not be able to turn around quick enough to respond to the incoming ball. Therefore, the robot is programmed to move towards a location that requires the least amount of movement. Allowing this to happen puts the robot in a strategic location without inhibiting the robot's ability to shift directions while in transition to the waiting location.
+
+\subsection{Shortcomings} \label{sec:short_plan}
+The planning and control for this robot is fairly robust, and I am quite happy with its performance. There are two main shortcomings that could have been improved upon. \par 
+
+First, the robot does not take into account collisions with the soccer goal. It rotates freely as if there are no obstacles in its way, which may cause reduction of points in the simulation. A way to get around this was to ensure the robot was primarily configured with locations that would not collide with the goal. By keeping the robot mostly out in front of the goal, it greatly reduced the probability that a collision would occur. \par 
+
+Secondly, the simulation constantly loses points because the velocity of Joint 6 is deemed outside of the joint velocity limits. This was discussed on Piazza, and seems to be an error with the simulation model. The configuration of Joint 6 is constantly driven to 0 in hopes of eliminating this error, however this does not work.
+
+
+%% Perception Strategy
+\section{Perception Strategy} \label{sec:perception}
+radius mapping (include a graph showing how they are related) (actual radius is taken from omniscient mode, allows us to see the z-location when balls are sitting still on the table)
+
+
+\subsection{Shortcomings} \label{sec:short_perc}
+inaccurate estimation at large distances
+
+
+\section{Reflection}
+\begin{itemize}
+\item what you could've improved
+\item what was harder than expected
+\item what additional challenges we face in real world (things getting in the way (robot), color of the bot is not going to be precise, air resistance), need for multiple camera angles)
+\end{itemize}
+
+\end{document}
+
+
+
+
+% LocalWords:  Simulink
